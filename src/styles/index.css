@@ -1,0 +1,93 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/geist';
+@import '@fontsource-variable/geist-mono';
+
+@plugin '@tailwindcss/forms';
+@plugin 'tailwind-clamp';
+
+@theme {
+    --font-sans: 'Geist Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --font-mono: 'Geist Mono Variable', 'Cascadia Code', 'SFMono-Regular', Consolas, monospace;
+
+    /* Surfaces */
+    --color-ink-950: #07060d;
+    --color-ink-900: #0d0c15;
+    --color-ink-850: #12111b;
+    --color-ink-800: #191823;
+    --color-ink-700: #252431;
+
+    /* The two sides of the process boundary. Use them only to mean renderer or main. */
+    --color-renderer: #4cc3ff;
+    /* Deep wine for main-process fills, lanes, borders, and glows. */
+    --color-main: #7d1947;
+    /* Luminous wine for main-process text and small marks that must stay legible on ink. */
+    --color-main-bright: #d0548c;
+
+    --color-coral-400: #fb7185;
+}
+
+html {
+    background: var(--color-ink-950);
+    color-scheme: dark;
+}
+
+/* Everything is sized in rem, so type and spacing grow together on large windows. */
+@media (min-width: 1600px) {
+    html {
+        font-size: 106.25%;
+    }
+}
+
+@media (min-width: 1920px) {
+    html {
+        font-size: 118.75%;
+    }
+}
+
+@media (min-width: 2400px) {
+    html {
+        font-size: 125%;
+    }
+}
+
+body {
+    min-width: 320px;
+    background: var(--color-ink-950);
+    font-feature-settings: 'ss01', 'cv11';
+    -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--color-ink-950);
+}
+
+::-webkit-scrollbar-thumb {
+    border: 2px solid var(--color-ink-950);
+    border-radius: 999px;
+    background: var(--color-ink-700);
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #34333f;
+}
+
+::selection {
+    background: color-mix(in oklab, var(--color-renderer) 35%, transparent);
+    color: white;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+    }
+}

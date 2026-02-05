@@ -1,0 +1,20 @@
+packages:
+    - .
+
+nodeVersion: 24.21.0
+engineStrict: true
+pmOnFail: error
+
+# pnpm quarantines packages published within the last 24 hours. Keep its
+# non-strict fallback so a brand-new transitive package is an explicit review
+# event rather than an unexplained install failure for template users. Never
+# add minimumReleaseAgeExclude entries just to take a same-day release.
+minimumReleaseAge: 1440
+minimumReleaseAgeStrict: false
+
+# Explicit allow map for dependency install scripts. Electron 44 no longer has
+# one: it downloads its binary on first use, so it is intentionally absent.
+allowBuilds:
+    electron-winstaller: true
+    esbuild: true
+    unrs-resolver: true

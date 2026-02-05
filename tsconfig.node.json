@@ -1,0 +1,17 @@
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "lib": ["ESNext"],
+        "types": ["node"]
+    },
+    "include": [
+        "electron/**/*",
+        "e2e/**/*",
+        "scripts/**/*",
+        "drizzle.config.ts",
+        "electron-builder.config.ts",
+        "playwright.config.ts",
+        "vite.config.ts",
+        "vitest.config.ts"
+    ]
+}

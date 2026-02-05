@@ -1,0 +1,482 @@
+name: Release desktop app
+
+on:
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: 'Strict SemVer tag: vX.Y.Z or vX.Y.Z-beta.N'
+                required: true
+                type: string
+
+permissions:
+    contents: read
+
+concurrency:
+    group: desktop-release
+    cancel-in-progress: false
+
+jobs:
+    prepare:
+        name: Validate release
+        runs-on: ubuntu-24.04
+        outputs:
+            channel: ${{ steps.release.outputs.channel }}
+            is_prerelease: ${{ steps.release.outputs.is_prerelease }}
+            source_sha: ${{ steps.release.outputs.source_sha }}
+            tag: ${{ steps.release.outputs.tag }}
+            version: ${{ steps.release.outputs.version }}
+        steps:
+            - name: Check out source and tags
+              uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+              with:
+                  fetch-depth: 0
+
+            - name: Set up Node.js and pnpm
+              uses: pnpm/setup@fbda4c85fc2e1e08721cd8763afea8f48d60f024 # v3.0.0
+              with:
+                  cache: true
+                  install: false
+
+            - name: Validate release input and source
+              id: release
+              env:
+                  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+                  EXPECTED_REPOSITORY: ${{ github.repository }}
+                  REF_NAME: ${{ github.ref_name }}
+                  REF_TYPE: ${{ github.ref_type }}
+                  RELEASE_TAG: ${{ inputs.tag }}
+                  SOURCE_SHA: ${{ github.sha }}
+              run: node scripts/release/prepare-release.mjs
+
+            - name: Reject existing immutable tag
+              env:
+                  RELEASE_TAG: ${{ steps.release.outputs.tag }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+                      echo "Release tag $RELEASE_TAG already exists and will not be moved." >&2
+                      exit 1
+                  fi
+
+            - name: Install dependencies from lockfile
+              run: pnpm install --frozen-lockfile
+
+            - name: Validate source
+              run: |
+                  pnpm run format:check
+                  pnpm run lint
+                  pnpm run typecheck
+                  pnpm test
+
+    build:
+        name: Build ${{ matrix.platform }}
+        needs: prepare
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - platform: linux
+                      os: ubuntu-24.04
+                      script: build:linux
+                    - platform: windows
+                      os: windows-2025
+                      script: build:win
+                    - platform: macos
+                      os: macos-15
+                      script: build:mac
+        steps:
+            - name: Check out validated source
+              uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+              with:
+                  ref: ${{ needs.prepare.outputs.source_sha }}
+                  persist-credentials: false
+
+            - name: Set up Node.js and pnpm, then install from lockfile
+              uses: pnpm/setup@fbda4c85fc2e1e08721cd8763afea8f48d60f024 # v3.0.0
+              with:
+                  cache: true
+                  require-lockfile: true
+
+            - name: Install Linux packaging prerequisites
+              if: matrix.platform == 'linux'
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  sudo apt-get update
+                  sudo apt-get install --no-install-recommends --yes binutils file libopenjp2-tools rpm squashfs-tools xvfb
+
+            - name: Run Electron window test
+              if: matrix.platform != 'linux'
+              env:
+                  UPDATER_ENABLED: '0'
+              run: pnpm run test:e2e
+
+            - name: Run Electron window test on Linux
+              if: matrix.platform == 'linux'
+              env:
+                  UPDATER_ENABLED: '0'
+              shell: bash
+              run: xvfb-run --auto-servernum pnpm run test:e2e
+
+            - name: Prepare optional Apple notarization key
+              if: matrix.platform == 'macos'
+              env:
+                  APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  if [[ -n "$APPLE_API_KEY_BASE64" ]]; then
+                      key_path="$RUNNER_TEMP/AuthKey.p8"
+                      printf '%s' "$APPLE_API_KEY_BASE64" | openssl base64 -d -A > "$key_path"
+                      chmod 600 "$key_path"
+                      printf 'APPLE_API_KEY=%s\n' "$key_path" >> "$GITHUB_ENV"
+                  fi
+
+            - name: Build Linux packages
+              if: matrix.platform == 'linux'
+              env:
+                  UPDATE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+              shell: bash
+              run: pnpm run "${{ matrix.script }}" --publish never
+
+            - name: Build and optionally sign Windows packages
+              if: matrix.platform == 'windows'
+              env:
+                  UPDATE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+                  WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+                  WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+              shell: bash
+              run: pnpm run "${{ matrix.script }}" --publish never
+
+            - name: Build, sign, and optionally notarize macOS packages
+              if: matrix.platform == 'macos'
+              env:
+                  APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+                  APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+                  CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+                  CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+                  CSC_INSTALLER_KEY_PASSWORD: ${{ secrets.MAC_INSTALLER_CSC_KEY_PASSWORD }}
+                  CSC_INSTALLER_LINK: ${{ secrets.MAC_INSTALLER_CSC_LINK }}
+                  UPDATE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+              shell: bash
+              run: pnpm run "${{ matrix.script }}" --publish never
+
+            - name: Verify Linux package structures
+              if: matrix.platform == 'linux'
+              env:
+                  UPDATE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  require_one() {
+                      local pattern="$1"
+                      local label="$2"
+                      local count
+                      count="$(find release -type f -name "$pattern" -print | wc -l | tr -d '[:space:]')"
+                      if [[ "$count" != '1' ]]; then
+                          echo "Expected exactly one $label, found $count." >&2
+                          exit 1
+                      fi
+                      find release -type f -name "$pattern" -print -quit
+                  }
+
+                  verify_appimage() {
+                      local appimage="$1"
+                      local architecture="$2"
+                      local elf_header
+                      local listing
+                      local valid_squashfs=false
+                      local -a offsets
+
+                      file "$appimage"
+                      elf_header="$(readelf -h "$appimage")"
+                      case "$architecture" in
+                          x86_64)
+                              grep -Eq 'Machine:[[:space:]]+Advanced Micro Devices X86-64' <<<"$elf_header"
+                              ;;
+                          arm64)
+                              grep -Eq 'Machine:[[:space:]]+AArch64' <<<"$elf_header"
+                              ;;
+                          *)
+                              echo "Unsupported AppImage architecture check: $architecture" >&2
+                              return 1
+                              ;;
+                      esac
+
+                      mapfile -t offsets < <(python3 - "$appimage" <<'PY'
+                  from pathlib import Path
+                  import sys
+
+                  contents = Path(sys.argv[1]).read_bytes()
+                  if contents[:4] != b'\x7fELF' or contents[8:11] != b'AI\x02':
+                      raise SystemExit('AppImage does not contain an ELF/type-2 AppImage header.')
+
+                  start = 0
+                  while True:
+                      offset = contents.find(b'hsqs', start)
+                      if offset < 0:
+                          break
+                      print(offset)
+                      start = offset + 4
+                  PY
+                      )
+
+                      listing="$(mktemp)"
+                      for offset in "${offsets[@]}"; do
+                          if unsquashfs -ll -o "$offset" "$appimage" >"$listing" 2>/dev/null \
+                              && grep -Eq '(^|/)AppRun$' "$listing"; then
+                              valid_squashfs=true
+                              break
+                          fi
+                      done
+                      rm -f "$listing"
+
+                      if [[ "$valid_squashfs" != 'true' ]]; then
+                          echo "AppImage does not contain a readable SquashFS payload with AppRun: $appimage" >&2
+                          return 1
+                      fi
+                  }
+
+                  for architecture in x86_64 arm64; do
+                      appimage="$(require_one "*-Linux-${architecture}.AppImage" "Linux ${architecture} AppImage")"
+                      verify_appimage "$appimage" "$architecture"
+                  done
+
+                  for architecture in amd64 arm64; do
+                      deb="$(require_one "*-Linux-${architecture}.deb" "Linux ${architecture} DEB")"
+                      dpkg-deb --info "$deb" >/dev/null
+                      dpkg-deb --contents "$deb" >/dev/null
+
+                      actual_architecture="$(dpkg-deb --field "$deb" Architecture)"
+                      if [[ "$actual_architecture" != "$architecture" ]]; then
+                          echo "Expected $deb to declare DEB architecture $architecture, got $actual_architecture." >&2
+                          exit 1
+                      fi
+                  done
+
+                  for architecture in x86_64 aarch64; do
+                      rpm_package="$(require_one "*-Linux-${architecture}.rpm" "Linux ${architecture} RPM")"
+                      rpm -qip "$rpm_package" >/dev/null
+                      rpm -qlp "$rpm_package" >/dev/null
+
+                      actual_architecture="$(rpm -qp --queryformat '%{ARCH}' "$rpm_package")"
+                      if [[ "$actual_architecture" != "$architecture" ]]; then
+                          echo "Expected $rpm_package to declare RPM architecture $architecture, got $actual_architecture." >&2
+                          exit 1
+                      fi
+                  done
+
+                  for manifest_architecture in x64 arm64; do
+                      case "$manifest_architecture" in
+                          x64)
+                              manifest="$(require_one "${UPDATE_CHANNEL}-linux.yml" 'Linux x64 update manifest')"
+                              appimage="$(require_one '*-Linux-x86_64.AppImage' 'Linux x64 updater AppImage')"
+                              ;;
+                          arm64)
+                              manifest="$(require_one "${UPDATE_CHANNEL}-linux-arm64.yml" 'Linux arm64 update manifest')"
+                              appimage="$(require_one '*-Linux-arm64.AppImage' 'Linux arm64 updater AppImage')"
+                              ;;
+                      esac
+                      grep -F -- "$(basename "$appimage")" "$manifest" >/dev/null
+                  done
+
+            - name: Verify Windows installer structure and optional signature
+              if: matrix.platform == 'windows'
+              env:
+                  WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+              shell: pwsh
+              run: |
+                  $ErrorActionPreference = 'Stop'
+                  $installers = @(Get-ChildItem -Path release -Recurse -File -Filter '*-Setup.exe')
+                  if ($installers.Count -ne 1) {
+                      throw "Expected exactly one Windows NSIS installer, found $($installers.Count)."
+                  }
+
+                  $stream = [System.IO.File]::OpenRead($installers[0].FullName)
+                  try {
+                      if ($stream.ReadByte() -ne 0x4d -or $stream.ReadByte() -ne 0x5a) {
+                          throw 'Windows installer does not have an MZ executable header.'
+                      }
+                  } finally {
+                      $stream.Dispose()
+                  }
+
+                  if ($env:WIN_CSC_LINK) {
+                      $signature = Get-AuthenticodeSignature -FilePath $installers[0].FullName
+                      if ($signature.Status -ne 'Valid') {
+                          throw "Windows installer signature status is $($signature.Status)."
+                      }
+                  }
+
+            - name: Verify macOS package structures and optional installer signature
+              if: matrix.platform == 'macos'
+              env:
+                  CSC_INSTALLER_LINK: ${{ secrets.MAC_INSTALLER_CSC_LINK }}
+                  UPDATE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  require_one() {
+                      local pattern="$1"
+                      local label="$2"
+                      local count
+                      count="$(find release -type f -name "$pattern" -print | wc -l | tr -d '[:space:]')"
+                      if [[ "$count" != '1' ]]; then
+                          echo "Expected exactly one $label, found $count." >&2
+                          exit 1
+                      fi
+                      find release -type f -name "$pattern" -print -quit
+                  }
+
+                  verify_app_architecture() {
+                      local app_bundle="$1"
+                      local architecture="$2"
+                      local executable_name
+                      local executable_path
+                      local binary_architectures
+
+                      executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_bundle/Contents/Info.plist")"
+                      executable_path="$app_bundle/Contents/MacOS/$executable_name"
+                      binary_architectures="$(lipo -archs "$executable_path")"
+
+                      case "$architecture" in
+                          x64)
+                              [[ "$binary_architectures" == 'x86_64' ]]
+                              ;;
+                          arm64)
+                              [[ "$binary_architectures" == 'arm64' ]]
+                              ;;
+                          universal)
+                              [[ " $binary_architectures " == *' x86_64 '* ]]
+                              [[ " $binary_architectures " == *' arm64 '* ]]
+                              ;;
+                          *)
+                              echo "Unsupported macOS architecture check: $architecture" >&2
+                              return 1
+                              ;;
+                      esac
+                  }
+
+                  manifest="$(require_one "${UPDATE_CHANNEL}-mac.yml" 'macOS update manifest')"
+                  extract_root="$(mktemp -d)"
+                  trap 'rm -rf "$extract_root"' EXIT
+
+                  for architecture in x64 arm64 universal; do
+                      dmg="$(require_one "*-macOS-${architecture}.dmg" "macOS ${architecture} DMG")"
+                      pkg="$(require_one "*-macOS-${architecture}.pkg" "macOS ${architecture} PKG")"
+                      zip="$(require_one "*-macOS-${architecture}.zip" "macOS ${architecture} updater ZIP")"
+
+                      hdiutil verify "$dmg"
+                      pkgutil --payload-files "$pkg" >/dev/null
+                      unzip -tq "$zip"
+                      grep -F -- "$(basename "$zip")" "$manifest" >/dev/null
+
+                      extract_dir="$extract_root/$architecture"
+                      mkdir "$extract_dir"
+                      ditto -x -k "$zip" "$extract_dir"
+                      app_bundle="$(find "$extract_dir" -maxdepth 1 -type d -name '*.app' -print -quit)"
+                      if [[ -z "$app_bundle" ]]; then
+                          echo "macOS $architecture updater ZIP does not contain a top-level app bundle." >&2
+                          exit 1
+                      fi
+                      verify_app_architecture "$app_bundle" "$architecture"
+
+                      if [[ -n "$CSC_INSTALLER_LINK" ]]; then
+                          pkgutil --check-signature "$pkg"
+                      fi
+                  done
+
+            - name: Upload platform artifacts
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+              with:
+                  name: release-${{ matrix.platform }}
+                  path: |
+                      release/**/*.AppImage
+                      release/**/*.blockmap
+                      release/**/*.deb
+                      release/**/*.dmg
+                      release/**/*.exe
+                      release/**/*.pkg
+                      release/**/*.rpm
+                      release/**/*.yml
+                      release/**/*.zip
+                      !release/**/*-unpacked/**
+                      !release/**/mac*/**
+                  if-no-files-found: error
+                  compression-level: 0
+                  retention-days: 7
+
+    release:
+        name: Publish GitHub release
+        needs: [prepare, build]
+        runs-on: ubuntu-24.04
+        environment:
+            name: release
+            url: ${{ steps.publish.outputs.url }}
+        permissions:
+            contents: write
+        steps:
+            - name: Check out validated source
+              uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+              with:
+                  ref: ${{ needs.prepare.outputs.source_sha }}
+                  persist-credentials: false
+
+            - name: Set up Node.js from .node-version
+              uses: pnpm/setup@fbda4c85fc2e1e08721cd8763afea8f48d60f024 # v3.0.0
+              with:
+                  install: false
+
+            - name: Download platform artifacts
+              uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+              with:
+                  pattern: release-*
+                  path: incoming-release-assets
+                  merge-multiple: true
+
+            - name: Verify, flatten, and checksum release assets
+              env:
+                  RELEASE_ASSET_OUTPUT: publish-release-assets
+                  RELEASE_ASSET_SOURCE: incoming-release-assets
+                  RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+                  UPDATE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+              run: node scripts/release/prepare-assets.mjs
+
+            - name: Extract curated changelog notes
+              env:
+                  RELEASE_NOTES_FILE: 'release-notes.md'
+                  RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+              run: node scripts/release/extract-release-notes.mjs
+
+            - name: Create immutable tag and publish release
+              id: publish
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
+                  RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+                  SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  release_args=(
+                      "$RELEASE_TAG"
+                      publish-release-assets/*
+                      --target "$SOURCE_SHA"
+                      --title "$RELEASE_TAG"
+                      --generate-notes
+                      --notes "$(cat release-notes.md)"
+                  )
+
+                  if [[ "$IS_PRERELEASE" == 'true' ]]; then
+                      release_args+=(--prerelease --latest=false)
+                  else
+                      release_args+=(--latest)
+                  fi
+
+                  gh release create "${release_args[@]}"
+                  release_url="$(gh release view "$RELEASE_TAG" --json url --jq '.url')"
+                  printf 'url=%s\n' "$release_url" >> "$GITHUB_OUTPUT"

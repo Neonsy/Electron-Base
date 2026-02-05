@@ -1,0 +1,40 @@
+{
+    "compilerOptions": {
+        "target": "ESNext",
+        "module": "ESNext",
+        "moduleResolution": "bundler",
+        "lib": ["ESNext", "DOM", "DOM.Iterable"],
+        "jsx": "react-jsx",
+        "strict": true,
+        "noEmit": true,
+        "skipLibCheck": true,
+        "esModuleInterop": true,
+        "allowSyntheticDefaultImports": true,
+        "allowImportingTsExtensions": true,
+        "forceConsistentCasingInFileNames": true,
+        "resolveJsonModule": true,
+        "isolatedModules": true,
+        "verbatimModuleSyntax": true,
+        "noUnusedLocals": true,
+        "noUnusedParameters": true,
+        "noFallthroughCasesInSwitch": true,
+        "noUncheckedIndexedAccess": true,
+        "exactOptionalPropertyTypes": true,
+        "paths": {
+            "@/web/*": ["./src/*"],
+            "@/app/*": ["./electron/*"]
+        },
+        "types": ["node", "vite/client"]
+    },
+    "include": [
+        "src/**/*",
+        "electron/**/*",
+        "e2e/**/*",
+        "drizzle.config.ts",
+        "electron-builder.config.ts",
+        "playwright.config.ts",
+        "vite.config.ts",
+        "vitest.config.ts"
+    ],
+    "exclude": ["node_modules", "dist", "dist-electron"]
+}

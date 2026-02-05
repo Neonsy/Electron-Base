@@ -1,0 +1,45 @@
+{
+    "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+    "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+    "timezone": "Etc/UTC",
+    "schedule": ["before 6am on monday"],
+    "minimumReleaseAge": "3 days",
+    "rangeStrategy": "bump",
+    "lockFileMaintenance": {
+        "enabled": true,
+        "schedule": ["before 6am on monday"]
+    },
+    "major": {
+        "dependencyDashboardApproval": true
+    },
+    "packageRules": [
+        {
+            "description": "Batch routine updates into one weekly PR.",
+            "matchUpdateTypes": ["minor", "patch", "digest"],
+            "matchCurrentVersion": "!/^0/",
+            "groupName": "non-major dependencies"
+        },
+        {
+            "description": "Electron minors carry Chromium security fixes; keep them separate and visible.",
+            "matchPackageNames": ["electron"],
+            "groupName": "Electron"
+        },
+        {
+            "description": "Drizzle ORM and Kit must move together while the template pins the 1.0 release candidate.",
+            "matchPackageNames": ["drizzle-orm", "drizzle-kit"],
+            "groupName": "Drizzle",
+            "rangeStrategy": "pin"
+        },
+        {
+            "description": "Node.js and pnpm are pinned in several files and are tested toolchain changes. Update them by hand.",
+            "matchDepNames": ["node", "pnpm"],
+            "enabled": false
+        },
+        {
+            "description": "@types/node follows the Node.js line that Electron embeds, not the newest Node.js major.",
+            "matchPackageNames": ["@types/node"],
+            "matchUpdateTypes": ["major"],
+            "enabled": false
+        }
+    ]
+}
